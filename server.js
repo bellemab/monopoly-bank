@@ -3,6 +3,9 @@ const app = express();
 
 app.use(express.json());
 app.use(express.static("public"));
+app.get("/health", (req, res) => {
+  res.json({ ok: true, message: "Monopoly Bank backend is alive" });
+});
 
 // --------------------
 // In-memory storage
@@ -20,7 +23,7 @@ app.post("/rooms", (req, res) => {
   const code = makeRoomCode();
   rooms.set(code, {
     code,
-    bank: 20580,
+    bank: 9_999_999_999_999,
     players: []
   });
   res.json({ code });
@@ -136,4 +139,32 @@ if (!from || !to || isNaN(amount) || amount <= 0) {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on http://localhost:${PORT}`);
+});
+
+// Reconnect (survive refresh): if playerId exists in room, reuse it.
+// If not, create a new player and return the new id.
+app.post("/rooms/:code/reconnect", (req, res) => {
+  const code = req.params.code.toUpperCase();
+  const room = rooms.get(code);
+  if (!room) return res.status(404).json({ error: "Room not found" });
+
+  const name = (req.body?.name || "").trim();
+  const incomingId = (req.body?.playerId || "").trim();
+
+  if (!name) return res.status(400).json({ error: "Name is required" });
+
+  // If their old playerId is still in the room, reuse it
+  if (incomingId) {
+    const existing = room.players.find(p => p.id === incomingId);
+    if (existing) return res.json({ ok: true, player: existing, room });
+  }
+
+  // Otherwise create a fresh player (new id)
+  const player = {
+    id: Math.random().toString(36).slice(2, 10),
+    name,
+    balance: 1500
+  };
+  room.players.push(player);
+  return res.json({ ok: true, player, room, rejoined: true });
 });
