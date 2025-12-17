@@ -1,0 +1,265 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Monopoly Bank</title>
+
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; padding: 20px; max-width: 520px; margin: 0 auto; }
+    h1 { margin-bottom: 4px; }
+    button, input, select { font-size: 16px; padding: 12px; width: 100%; margin: 8px 0; }
+    .row { display: flex; gap: 10px; }
+    .row > * { flex: 1; }
+    .card { border: 1px solid #ddd; border-radius: 14px; padding: 14px; margin-top: 14px; }
+    pre { background: #f6f6f6; padding: 12px; border-radius: 12px; overflow: auto; font-size: 14px; }
+    .small { font-size: 13px; color: #666; }
+  </style>
+</head>
+
+<body>
+  <h1>Monopoly Bank</h1>
+  <p class="small">Tap buttons. Move money. Bankrupt your friends. 😈</p>
+
+  <div class="card">
+    <button id="btnCreate">Host Game (Create Room)</button>
+
+    <div class="row">
+      <input id="roomCode" placeholder="Room code" />
+      <button id="btnCopy">Copy</button>
+    </div>
+
+    <input id="name" placeholder="Your name (ex: Belle)" />
+    <button id="btnJoin">Join Game</button>
+  </div>
+
+  <div class="card">
+    <h3>Money Moves</h3>
+
+    <div class="row">
+      <input id="amount" type="number" value="200" />
+      <button id="btnBankPay">Bank → Me</button>
+    </div>
+
+    <button id="btnPayBank">Me → Bank</button>
+
+    <div class="row">
+      <select id="toPlayer">
+        <option value="">Pick a player…</option>
+      </select>
+      <button id="btnPayPlayer">Me → Player</button>
+    </div>
+
+    <p class="small">If the dropdown is empty, no one else has joined yet (or the server restarted).</p>
+  </div>
+
+  <div class="card">
+    <h3>Room Snapshot</h3>
+    <pre id="snapshot">Not connected.</pre>
+  </div>
+
+  <div class="card">
+    <h3>Status</h3>
+    <pre id="out">Ready.</pre>
+  </div>
+
+<script>
+  const out = document.getElementById("out");
+  const snapshot = document.getElementById("snapshot");
+  const roomCodeEl = document.getElementById("roomCode");
+  const nameEl = document.getElementById("name");
+  const amountEl = document.getElementById("amount");
+  const toPlayerEl = document.getElementById("toPlayer");
+
+  let playerId = null;
+  const SESSION_KEY = "monopoly-session";
+
+  function log(msg) {
+    out.textContent = typeof msg === "string" ? msg : JSON.stringify(msg, null, 2);
+  }
+
+  function getCode() {
+    return roomCodeEl.value.trim().toUpperCase();
+  }
+
+  function saveSession() {
+    const payload = {
+      roomCode: getCode(),
+      name: nameEl.value.trim(),
+      playerId
+    };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(payload));
+  }
+
+  function loadSession() {
+    const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || "{}");
+    if (saved.roomCode) roomCodeEl.value = saved.roomCode;
+    if (saved.name) nameEl.value = saved.name;
+    if (saved.playerId) playerId = saved.playerId;
+  }
+
+  async function api(path, options = {}) {
+    const res = await fetch(path, options);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw data;
+    return data;
+  }
+
+  function renderRoom(room) {
+    const lines = [];
+    lines.push(`Room: ${room.code}`);
+    lines.push(`Bank: $${room.bank}`);
+    lines.push("");
+    lines.push("Players:");
+    for (const p of room.players) {
+      const me = (p.id === playerId) ? " (me)" : "";
+      lines.push(`- ${p.name}${me}: $${p.balance}`);
+    }
+    snapshot.textContent = lines.join("\n");
+
+    // dropdown
+    const keep = toPlayerEl.value;
+    toPlayerEl.innerHTML = `<option value="">Pick a player…</option>`;
+    for (const p of room.players) {
+      if (p.id === playerId) continue;
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = p.name;
+      toPlayerEl.appendChild(opt);
+    }
+    toPlayerEl.value = keep;
+  }
+
+  async function refreshRoom() {
+    const code = getCode();
+    if (!code) return;
+    try {
+      const data = await api(`/rooms/${code}`);
+      renderRoom(data.room);
+    } catch (e) {
+      snapshot.textContent = "Room not found (or server restarted).";
+      toPlayerEl.innerHTML = `<option value="">Pick a player…</option>`;
+    }
+  }
+
+  async function reconnectIfPossible() {
+  const code = getCode();
+  const name = nameEl.value.trim();
+  if (!code || !name) return;
+
+  try {
+    const data = await api(`/rooms/${code}/reconnect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, playerId })
+    });
+
+    playerId = data.player.id;   // <-- important
+    saveSession();
+    await refreshRoom();
+    log(data.rejoined ? "Reconnected (new id)" : "Reconnected");
+  } catch (e) {
+    log(e);
+  }
+}
+
+  // Auto-refresh snapshot
+  setInterval(refreshRoom, 1000);
+
+  document.getElementById("btnCreate").onclick = async () => {
+    try {
+      const data = await api("/rooms", { method: "POST" });
+      roomCodeEl.value = data.code;
+      playerId = null;
+      saveSession();
+      log({ createdRoom: data.code });
+      await refreshRoom();
+    } catch (e) { log(e); }
+  };
+
+  document.getElementById("btnJoin").onclick = async () => {
+    const code = getCode();
+    const name = nameEl.value.trim();
+    if (!code) return log("Enter room code.");
+    if (!name) return log("Enter your name.");
+
+    try {
+      const data = await api(`/rooms/${code}/join`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name })
+      });
+      playerId = data.player.id;
+      saveSession();
+      log({ joined: name, playerId });
+      await refreshRoom();
+    } catch (e) { log(e); }
+  };
+
+  document.getElementById("btnBankPay").onclick = async () => {
+    const code = getCode();
+    const amount = Number(amountEl.value);
+    if (!playerId) return log("Join first.");
+    try {
+      const data = await api(`/rooms/${code}/transfer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from: "bank", to: playerId, amount })
+      });
+      log(data);
+      await refreshRoom();
+    } catch (e) { log(e); }
+  };
+
+  document.getElementById("btnPayBank").onclick = async () => {
+    const code = getCode();
+    const amount = Number(amountEl.value);
+    if (!playerId) return log("Join first.");
+    try {
+      const data = await api(`/rooms/${code}/transfer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from: playerId, to: "bank", amount })
+      });
+      log(data);
+      await refreshRoom();
+    } catch (e) { log(e); }
+  };
+
+  document.getElementById("btnPayPlayer").onclick = async () => {
+    const code = getCode();
+    const amount = Number(amountEl.value);
+    const to = toPlayerEl.value;
+    if (!playerId) return log("Join first.");
+    if (!to) return log("Pick a player.");
+    try {
+      const data = await api(`/rooms/${code}/transfer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from: playerId, to, amount })
+      });
+      log(data);
+      await refreshRoom();
+    } catch (e) { log(e); }
+  };
+
+  document.getElementById("btnCopy").onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(getCode());
+      log("Room code copied.");
+    } catch {
+      log("Copy failed.");
+    }
+  };
+
+  roomCodeEl.addEventListener("input", saveSession);
+  nameEl.addEventListener("input", saveSession);
+
+  // Boot
+  loadSession();
+reconnectIfPossible();
+refreshRoom();
+</script>
+
+</body>
+</html>
